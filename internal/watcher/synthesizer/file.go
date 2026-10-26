@@ -180,9 +180,14 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 	if provider == "" || provider == "gemini-cli" {
 		return nil, nil
 	}
+	// Label precedence: explicit "label" field in the credential file, then the
+	// account email, then the provider name. Mirrors FileTokenStore.labelFor.
 	label := provider
-	if email, _ := metadata["email"].(string); email != "" {
-		label = email
+	if email, _ := metadata["email"].(string); strings.TrimSpace(email) != "" {
+		label = strings.TrimSpace(email)
+	}
+	if explicit, _ := metadata["label"].(string); strings.TrimSpace(explicit) != "" {
+		label = strings.TrimSpace(explicit)
 	}
 	// Use relative path under authDir as ID to stay consistent with the file-based token store.
 	id := fullPath
