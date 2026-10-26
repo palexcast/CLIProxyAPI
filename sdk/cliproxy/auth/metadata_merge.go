@@ -305,6 +305,12 @@ func mergeAuthContent(base, current, updated *Auth) *Auth {
 		merged.Runtime = updated.Runtime
 	}
 
+	// Label is derived from credential metadata when the file is read. A reloaded
+	// file may carry a new label, so a non-empty updated value replaces the current one.
+	if updatedLabel := strings.TrimSpace(updated.Label); updatedLabel != "" {
+		merged.Label = updatedLabel
+	}
+
 	// 3. ProxyURL three-way merge (supporting both struct field and metadata modifications)
 	baseStruct := ""
 	if base != nil {
