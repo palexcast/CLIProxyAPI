@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -149,5 +150,99 @@ func TestGetQuotaHistory(t *testing.T) {
 		if rec.Code != http.StatusBadRequest || json.Unmarshal(rec.Body.Bytes(), &errBody) != nil || errBody["error"] == "" {
 			t.Fatalf("%s: status = %d body=%s", query, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+type fakeSnapshotReader struct {
+	fakeSampleRecorder
+	entries map[string]quotahistory.SnapshotEntry
+}
+
+func (f *fakeSnapshotReader) QuotaSnapshot() map[string]quotahistory.SnapshotEntry {
+	return f.entries
+}
+
+func serveQuotaSnapshot(h *Handler) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v8/management/observability/quota-snapshot", nil)
+	h.GetQuotaSnapshot(ginCtx)
+	return rec
+}
+
+func TestGetQuotaSnapshot(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	rec := serveQuotaSnapshot(NewHandlerWithoutConfigFilePath(&config.Config{}, nil))
+	var errBody map[string]string
+	if rec.Code != http.StatusServiceUnavailable || json.Unmarshal(rec.Body.Bytes(), &errBody) != nil || errBody["error"] == "" {
+		t.Fatalf("no manager: status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	for _, auth := range []*coreauth.Auth{
+		{ID: "claude-b", Provider: "claude", FileName: "/auths/claude-b-user@example.com.json", Label: "B team"},
+		{ID: "claude-a", Provider: "claude", Label: "A"},
+		{ID: "claude-c", Provider: "claude"},
+		{ID: "codex-a", Provider: "codex"},
+	} {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register %s: %v", auth.ID, errRegister)
+		}
+	}
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	// Without a recorder every account is listed with nothing known.
+	rec = serveQuotaSnapshot(h)
+	if want := `[{"auth_id":"claude-a","name":"claude-a","label":"A","provider":"claude"},` +
+		`{"auth_id":"claude-b","name":"claude-b-user@example.com.json","label":"B team","provider":"claude"},` +
+		`{"auth_id":"claude-c","name":"claude-c","label":"","provider":"claude"}]`; rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"accounts":`+want) {
+		t.Fatalf("no recorder: status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	u5, u7 := 0.42, 0.11
+	r5, r7 := int64(1761580800), int64(1762000000)
+	observed := time.Date(2026, 10, 27, 11, 58, 3, 0, time.UTC)
+	refreshed := time.Date(2026, 10, 27, 9, 15, 0, 0, time.UTC)
+	manager.SetQuotaHistoryRecorder(&fakeSnapshotReader{entries: map[string]quotahistory.SnapshotEntry{
+		"claude-b": {
+			ObservedAt: &observed, U5: &u5, R5: &r5, S5: "allowed", U7: &u7, R7: &r7, S7: "allowed",
+			RefreshedAt: &refreshed, Usage: json.RawMessage(`{"five_hour":{"utilization":42},"extra_usage":{"is_enabled":false}}`),
+		},
+		"claude-a":    {ObservedAt: &observed, U5: &u5},
+		"claude-gone": {ObservedAt: &observed, U7: &u7},
+	}})
+	before := time.Now().UTC().Truncate(time.Second)
+	rec = serveQuotaSnapshot(h)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		GeneratedAt string           `json:"generated_at"`
+		Accounts    []map[string]any `json:"accounts"`
+	}
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &payload); errDecode != nil {
+		t.Fatal(errDecode)
+	}
+	generated, errParse := time.Parse(time.RFC3339, payload.GeneratedAt)
+	if errParse != nil || generated.Before(before) {
+		t.Fatalf("generated_at = %q", payload.GeneratedAt)
+	}
+	if len(payload.Accounts) != 3 {
+		t.Fatalf("accounts = %s", rec.Body.String())
+	}
+	a, b, c := payload.Accounts[0], payload.Accounts[1], payload.Accounts[2]
+	if a["auth_id"] != "claude-a" || a["observed_at"] != "2026-10-27T11:58:03Z" || a["u5"] != 0.42 || len(a) != 6 {
+		t.Fatalf("claude-a = %#v", a)
+	}
+	usage, _ := b["usage"].(map[string]any)
+	if b["auth_id"] != "claude-b" || b["name"] != "claude-b-user@example.com.json" || b["label"] != "B team" ||
+		b["u5"] != 0.42 || b["r5"] != float64(r5) || b["s5"] != "allowed" ||
+		b["u7"] != 0.11 || b["r7"] != float64(r7) || b["s7"] != "allowed" ||
+		b["refreshed_at"] != "2026-10-27T09:15:00Z" || usage == nil || usage["five_hour"] == nil || usage["extra_usage"] == nil {
+		t.Fatalf("claude-b = %#v", b)
+	}
+	if c["auth_id"] != "claude-c" || len(c) != 4 {
+		t.Fatalf("claude-c = %#v", c)
 	}
 }

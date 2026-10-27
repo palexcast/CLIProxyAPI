@@ -711,7 +711,9 @@ func (s *Service) resolveCooldownStateStore(cfg *config.Config) coreauth.Cooldow
 }
 
 // startQuotaHistory records Claude rate-limit headers under the auth directory.
-// It stays disabled when there is no local auth directory.
+// It stays disabled when there is no local auth directory. The writer outlives
+// ctx so responses completing during shutdown are still recorded;
+// stopQuotaHistory stops it.
 func (s *Service) startQuotaHistory(ctx context.Context, cfg *config.Config) {
 	if s == nil || s.coreManager == nil || cfg == nil || cfg.Home.Enabled {
 		return
@@ -726,7 +728,23 @@ func (s *Service) startQuotaHistory(ctx context.Context, cfg *config.Config) {
 	}
 	recorder := quotahistory.NewRecorder(quotahistory.NewStore(filepath.Join(authDir, quotahistory.DirName)))
 	s.coreManager.SetQuotaHistoryRecorder(recorder)
-	go recorder.Run(ctx)
+	stop := recorder.Start(ctx)
+	s.cfgMu.Lock()
+	s.quotaHistoryDone = recorder.Done()
+	s.quotaHistoryStop = stop
+	s.cfgMu.Unlock()
+}
+
+// stopQuotaHistory stops the quota history writer, which then writes its queue
+// and flushes the snapshot. It does nothing when the writer was not started
+// and is safe to call more than once.
+func (s *Service) stopQuotaHistory() {
+	s.cfgMu.RLock()
+	stop := s.quotaHistoryStop
+	s.cfgMu.RUnlock()
+	if stop != nil {
+		stop()
+	}
 }
 
 func resolveCooldownStateAuthDir(cfg *config.Config) (string, error) {

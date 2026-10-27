@@ -490,11 +490,14 @@ func (st *Store) Prune(now time.Time) error {
 }
 
 // Recorder throttles observations per auth and hands them to a background
-// writer. Record never blocks: when the queue is full the sample is dropped.
+// writer, which appends them to the day files and folds them into the
+// snapshot. Record never blocks: when the queue is full the sample is dropped.
 type Recorder struct {
-	store   *Store
-	queue   chan Sample
-	nowFunc func() time.Time
+	store    *Store
+	snapshot *Snapshot
+	queue    chan queueItem
+	done     chan struct{}
+	nowFunc  func() time.Time
 
 	mu         sync.Mutex
 	last       map[string]lastRecorded
@@ -502,21 +505,35 @@ type Recorder struct {
 	dropWarnAt time.Time
 }
 
+// queueItem is either a rate-limit sample or a usage-endpoint body.
+type queueItem struct {
+	sample Sample
+	usage  *usageRecord
+}
+
+type usageRecord struct {
+	authID string
+	at     time.Time
+	body   json.RawMessage
+}
+
 var _ coreauth.QuotaHistoryRecorder = (*Recorder)(nil)
 
-// NewRecorder returns a recorder writing to store. Call Run to start writing.
+// NewRecorder returns a recorder writing to store, with its snapshot in the
+// same directory. Call Run to start writing.
 func NewRecorder(store *Store) *Recorder {
 	return &Recorder{
-		store:   store,
-		queue:   make(chan Sample, queueSize),
-		nowFunc: time.Now,
-		last:    make(map[string]lastRecorded),
+		store:    store,
+		snapshot: NewSnapshot(store.dir),
+		queue:    make(chan queueItem, queueSize),
+		done:     make(chan struct{}),
+		nowFunc:  time.Now,
+		last:     make(map[string]lastRecorded),
 	}
 }
 
-// lastRecorded is the last recorded sample carrying each window, for the throttle.
-type lastRecorded struct {
-	w5, w7 *Sample
+func isClaude(auth *coreauth.Auth) bool {
+	return auth != nil && auth.ID != "" && strings.EqualFold(strings.TrimSpace(auth.Provider), "claude")
 }
 
 // Record captures the rate-limit headers of a Claude response. At most one
@@ -533,11 +550,22 @@ func (r *Recorder) Record(auth *coreauth.Auth, headers http.Header, now time.Tim
 	r.RecordSample(auth, s, now)
 }
 
-// RecordSample records a sample built elsewhere, such as from the usage
-// endpoint, for a Claude auth with the same throttle as Record. T and AuthID
-// are set from now and auth. It never blocks.
+// RecordSample records a sample built elsewhere for a Claude auth with the same
+// throttle as Record. T and AuthID are set from now and auth. It never blocks.
 func (r *Recorder) RecordSample(auth *coreauth.Auth, s Sample, now time.Time) {
-	if r == nil || auth == nil || auth.ID == "" || !strings.EqualFold(strings.TrimSpace(auth.Provider), "claude") {
+	r.recordSample(auth, s, now, false)
+}
+
+// RecordSampleNow records a sample like RecordSample but bypasses the throttle,
+// for readings of the usage endpoint: they are rare, and each one must reach
+// the history and the snapshot so observed_at never lags behind the usage body
+// stored by RecordUsage. It still updates the throttle state and never blocks.
+func (r *Recorder) RecordSampleNow(auth *coreauth.Auth, s Sample, now time.Time) {
+	r.recordSample(auth, s, now, true)
+}
+
+func (r *Recorder) recordSample(auth *coreauth.Auth, s Sample, now time.Time, force bool) {
+	if r == nil || !isClaude(auth) {
 		return
 	}
 	if s.U5 == nil && s.U7 == nil {
@@ -559,12 +587,11 @@ func (r *Recorder) RecordSample(auth *coreauth.Auth, s Sample, now time.Time) {
 	due := func(prev *Sample, changed func(prev, s Sample) bool) bool {
 		return prev == nil || now.Sub(prev.T) >= throttleInterval || changed(*prev, s)
 	}
-	record := (carries5(s) && due(last.w5, changed5)) || (carries7(s) && due(last.w7, changed7))
+	record := force || (carries5(s) && due(last.w5, changed5)) || (carries7(s) && due(last.w7, changed7))
 	if !record {
 		return
 	}
-	select {
-	case r.queue <- s:
+	if r.enqueue(queueItem{sample: s}, now) {
 		recorded := s
 		if carries5(s) {
 			last.w5 = &recorded
@@ -573,13 +600,48 @@ func (r *Recorder) RecordSample(auth *coreauth.Auth, s Sample, now time.Time) {
 			last.w7 = &recorded
 		}
 		r.last[s.AuthID] = last
+	}
+}
+
+// lastRecorded is the last recorded sample carrying each window, for the throttle.
+type lastRecorded struct {
+	w5, w7 *Sample
+}
+
+// RecordUsage stores a successful Claude usage-endpoint body in the snapshot.
+// The body must be a JSON object of at most MaxUsageBytes; anything else is
+// dropped. It never blocks.
+func (r *Recorder) RecordUsage(auth *coreauth.Auth, body []byte, now time.Time) {
+	if r == nil || !isClaude(auth) {
+		return
+	}
+	usage, ok := normalizeUsage(body)
+	if !ok {
+		log.Debug("quota history: usage response is not a JSON object within the size limit")
+		return
+	}
+	if now.IsZero() {
+		now = r.nowFunc()
+	}
+	item := queueItem{usage: &usageRecord{authID: auth.ID, at: now.UTC().Truncate(time.Second), body: usage}}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.enqueue(item, now)
+}
+
+// enqueue hands item to the writer without blocking. r.mu must be held.
+func (r *Recorder) enqueue(item queueItem, now time.Time) bool {
+	select {
+	case r.queue <- item:
+		return true
 	default:
 		r.dropped++
 		if now.Sub(r.dropWarnAt) >= dropWarnInterval {
-			log.Warnf("quota history: write queue full, dropped %d sample(s)", r.dropped)
+			log.Warnf("quota history: write queue full, dropped %d item(s)", r.dropped)
 			r.dropped = 0
 			r.dropWarnAt = now
 		}
+		return false
 	}
 }
 
@@ -589,22 +651,90 @@ func (r *Recorder) Query(since, until time.Time, authIDs []string, step int64) (
 	return r.store.Query(since, until, authIDs, step, MaxQuerySamples)
 }
 
-// Run writes queued samples and prunes old day files until ctx is done.
+// QuotaSnapshot returns the latest known quota state keyed by auth id.
+func (r *Recorder) QuotaSnapshot() map[string]SnapshotEntry {
+	return r.snapshot.Accounts()
+}
+
+// Start runs the recorder in the background until stop is called. Its context
+// keeps parent's values but not its cancellation, so samples recorded while the
+// owner shuts down, after parent is done, are still written; after stop, Run
+// writes the queue and flushes the snapshot, then closes Done.
+func (r *Recorder) Start(parent context.Context) (stop context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
+	go r.Run(ctx)
+	return cancel
+}
+
+// Run loads the snapshot, then writes queued items and prunes old day files
+// until ctx is done, when the items still queued are written and a pending
+// snapshot change is flushed. Done is closed when Run returns.
 func (r *Recorder) Run(ctx context.Context) {
+	defer close(r.done)
+	r.loadSnapshot()
 	r.prune()
 	ticker := time.NewTicker(pruneInterval)
 	defer ticker.Stop()
+	flushTicker := time.NewTicker(snapshotDebounce)
+	defer flushTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
+			r.drainQueue()
+			r.flushSnapshot(true)
 			return
-		case s := <-r.queue:
-			if errAppend := r.store.Append(s); errAppend != nil {
-				log.Warnf("quota history: %v", errAppend)
-			}
+		case item := <-r.queue:
+			r.handle(item)
+			r.flushSnapshot(false)
+		case <-flushTicker.C:
+			r.flushSnapshot(false)
 		case <-ticker.C:
 			r.prune()
 		}
+	}
+}
+
+// Done is closed when Run has returned and the snapshot is flushed.
+func (r *Recorder) Done() <-chan struct{} {
+	return r.done
+}
+
+// drainQueue writes the items queued so far without waiting for more. Only Run
+// receives from the queue, so none of these receives blocks.
+func (r *Recorder) drainQueue() {
+	for n := len(r.queue); n > 0; n-- {
+		r.handle(<-r.queue)
+	}
+}
+
+func (r *Recorder) handle(item queueItem) {
+	if item.usage != nil {
+		r.snapshot.ApplyUsage(item.usage.authID, item.usage.body, item.usage.at)
+		return
+	}
+	if errAppend := r.store.Append(item.sample); errAppend != nil {
+		log.Warnf("quota history: %v", errAppend)
+	}
+	r.snapshot.ApplySample(item.sample)
+}
+
+// loadSnapshot reads the snapshot file, then applies the recent day files on
+// top of it. That rebuilds the snapshot when the file is missing or unreadable,
+// and otherwise adds the samples written after its last flush: ApplySample
+// skips samples older than an entry's observed_at and leaves the stored usage
+// alone.
+func (r *Recorder) loadSnapshot() {
+	if _, errLoad := r.snapshot.Load(); errLoad != nil {
+		log.Warnf("quota history: %v; rebuilding from day files", errLoad)
+	}
+	if errSeed := r.snapshot.Seed(r.store, r.nowFunc()); errSeed != nil {
+		log.Warnf("quota history: seed snapshot: %v", errSeed)
+	}
+}
+
+func (r *Recorder) flushSnapshot(force bool) {
+	if errFlush := r.snapshot.Flush(r.nowFunc(), force); errFlush != nil {
+		log.Warnf("quota history: %v", errFlush)
 	}
 }
 

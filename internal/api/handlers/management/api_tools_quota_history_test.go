@@ -23,15 +23,28 @@ type fakeSampleRecorder struct {
 	mu      sync.Mutex
 	samples []quotahistory.Sample
 	authIDs []string
+	usages  []string
 }
 
 func (f *fakeSampleRecorder) Record(*coreauth.Auth, http.Header, time.Time) {}
 
-func (f *fakeSampleRecorder) RecordSample(auth *coreauth.Auth, sample quotahistory.Sample, _ time.Time) {
+func (f *fakeSampleRecorder) RecordSampleNow(auth *coreauth.Auth, sample quotahistory.Sample, _ time.Time) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.samples = append(f.samples, sample)
 	f.authIDs = append(f.authIDs, auth.ID)
+}
+
+func (f *fakeSampleRecorder) RecordUsage(auth *coreauth.Auth, body []byte, _ time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.usages = append(f.usages, auth.ID+" "+string(body))
+}
+
+func (f *fakeSampleRecorder) recordedUsages() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.usages...)
 }
 
 func (f *fakeSampleRecorder) recorded() ([]quotahistory.Sample, []string) {
@@ -104,11 +117,15 @@ func TestAPICallRecordsClaudeUsageQuotaHistory(t *testing.T) {
 			}
 
 			samples, authIDs := fake.recorded()
+			usages := fake.recordedUsages()
 			if !tc.want {
-				if len(samples) != 0 {
-					t.Fatalf("recorded samples = %+v, want none", samples)
+				if len(samples) != 0 || len(usages) != 0 {
+					t.Fatalf("recorded samples = %+v usages = %v, want none", samples, usages)
 				}
 				return
+			}
+			if len(usages) != 1 || usages[0] != "claude-usage-a "+usageResponseBody {
+				t.Fatalf("recorded usages = %v", usages)
 			}
 			if len(samples) != 1 || authIDs[0] != "claude-usage-a" {
 				t.Fatalf("recorded samples = %+v for %v, want one for claude-usage-a", samples, authIDs)

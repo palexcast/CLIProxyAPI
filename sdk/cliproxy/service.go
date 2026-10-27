@@ -118,6 +118,12 @@ type Service struct {
 	// cooldownStateStore persists runtime cooldown state when enabled.
 	cooldownStateStore coreauth.CooldownStateStore
 
+	// quotaHistoryDone is closed when the quota history writer has stopped, and
+	// quotaHistoryStop stops it; both are nil when it was not started. Protected
+	// by cfgMu.
+	quotaHistoryDone <-chan struct{}
+	quotaHistoryStop context.CancelFunc
+
 	// pluginHost owns dynamic plugin lifecycle and runtime capability adapters.
 	pluginHost *pluginhost.Host
 

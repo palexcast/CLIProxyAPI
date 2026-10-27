@@ -89,8 +89,10 @@ func drain(r *Recorder) []Sample {
 	var out []Sample
 	for {
 		select {
-		case s := <-r.queue:
-			out = append(out, s)
+		case item := <-r.queue:
+			if item.usage == nil {
+				out = append(out, item.sample)
+			}
 		default:
 			return out
 		}

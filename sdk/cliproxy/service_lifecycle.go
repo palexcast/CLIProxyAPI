@@ -47,6 +47,9 @@ func (s *Service) Run(ctx context.Context) error {
 	s.homeMu.Unlock()
 	defer func() {
 		runCancel()
+		// Shutdown normally stops the quota history writer; this covers a
+		// Shutdown that ran before Run started it.
+		s.stopQuotaHistory()
 		s.homeMu.Lock()
 		if s.runCancel != nil {
 			s.runCancel = nil
@@ -372,6 +375,22 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				if shutdownErr == nil {
 					shutdownErr = errStop
 				}
+			}
+		}
+
+		// The quota history writer is stopped only now that the API server no
+		// longer serves requests, so responses completing during the teardown
+		// above are still recorded; wait for it to write its queue and flush
+		// the snapshot.
+		s.stopQuotaHistory()
+		s.cfgMu.RLock()
+		quotaHistoryDone := s.quotaHistoryDone
+		s.cfgMu.RUnlock()
+		if quotaHistoryDone != nil {
+			select {
+			case <-quotaHistoryDone:
+			case <-ctx.Done():
+				log.Warn("quota history writer did not stop before the shutdown deadline")
 			}
 		}
 
