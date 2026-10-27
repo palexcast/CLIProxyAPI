@@ -429,6 +429,12 @@ func hasHeaderCaseInsensitive(h http.Header, target string) bool {
 	return false
 }
 
+// ParseUnixOrTimestamp parses a rate-limit reset header given as Unix seconds,
+// RFC3339 or an HTTP date.
+func ParseUnixOrTimestamp(raw string) (time.Time, bool) {
+	return parseUnixOrTimestamp(raw)
+}
+
 func parseUnixOrTimestamp(raw string) (time.Time, bool) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {

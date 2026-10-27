@@ -683,3 +683,43 @@ func TestObserveResponseHeadersKeepsPrimaryWhenTruncatingAdditional(t *testing.T
 		t.Fatalf("snapshot size = %d, want %d", len(quota.Signals), maxQuotaSignalHeaders)
 	}
 }
+
+type recordedQuotaHistory struct {
+	authID      string
+	utilization string
+}
+
+type fakeQuotaHistoryRecorder struct {
+	calls []recordedQuotaHistory
+}
+
+func (f *fakeQuotaHistoryRecorder) Record(auth *Auth, headers http.Header, _ time.Time) {
+	f.calls = append(f.calls, recordedQuotaHistory{
+		authID:      auth.ID,
+		utilization: headers.Get("Anthropic-Ratelimit-Unified-5h-Utilization"),
+	})
+}
+
+func TestMarkResultForwardsResponseHeadersToQuotaHistory(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	recorder := &fakeQuotaHistoryRecorder{}
+	manager.SetQuotaHistoryRecorder(recorder)
+	if manager.QuotaHistoryRecorder() != recorder {
+		t.Fatal("QuotaHistoryRecorder() did not return the installed recorder")
+	}
+	auth, errRegister := manager.Register(context.Background(), &Auth{ID: "quota-history-auth", Provider: "claude"})
+	if errRegister != nil || auth == nil {
+		t.Fatalf("Register() auth=%#v err=%v", auth, errRegister)
+	}
+
+	ctx := internallogging.WithResponseHeadersHolder(context.Background())
+	internallogging.SetResponseHeaders(ctx, http.Header{
+		"Anthropic-Ratelimit-Unified-5h-Utilization": []string{"0.42"},
+	})
+	manager.MarkResult(ctx, Result{AuthID: auth.ID, Provider: "claude", Model: "claude-opus-4-6", Success: true})
+	manager.MarkResult(ctx, Result{AuthID: auth.ID, Provider: "claude", Model: "claude-opus-4-6", Success: true, SkipQuotaObservation: true})
+
+	if len(recorder.calls) != 1 || recorder.calls[0] != (recordedQuotaHistory{authID: auth.ID, utilization: "0.42"}) {
+		t.Fatalf("recorder calls = %#v", recorder.calls)
+	}
+}

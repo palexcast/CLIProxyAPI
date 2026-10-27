@@ -85,6 +85,7 @@ func (s *Service) Run(ctx context.Context) error {
 
 	s.applyRetryConfig(cfg)
 	s.configureCooldownStateStore(cfg)
+	s.startQuotaHistory(ctx, cfg)
 
 	s.registerPluginAuthParser()
 	if s.coreManager != nil && !homeEnabled {

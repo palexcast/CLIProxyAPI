@@ -54,6 +54,33 @@ func (q *QuotaState) ObserveResponseHeadersForProvider(provider string, headers 
 	return true
 }
 
+// QuotaHistoryRecorder receives the response headers of each upstream result
+// for passive quota history. Record is called under the manager lock and must
+// not block.
+type QuotaHistoryRecorder interface {
+	Record(auth *Auth, headers http.Header, now time.Time)
+}
+
+// SetQuotaHistoryRecorder installs the recorder; nil disables recording.
+func (m *Manager) SetQuotaHistoryRecorder(recorder QuotaHistoryRecorder) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.quotaHistory = recorder
+	m.mu.Unlock()
+}
+
+// QuotaHistoryRecorder returns the installed recorder, or nil.
+func (m *Manager) QuotaHistoryRecorder() QuotaHistoryRecorder {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.quotaHistory
+}
+
 // ClearObservationSignals removes only passive observation data. It leaves
 // cooldown and scheduler state untouched.
 func (q *QuotaState) ClearObservationSignals() bool {

@@ -251,6 +251,9 @@ type Manager struct {
 	// Optional HTTP RoundTripper provider injected by host.
 	rtProvider RoundTripperProvider
 
+	// quotaHistory records passive rate-limit observations; guarded by mu.
+	quotaHistory QuotaHistoryRecorder
+
 	// Auto refresh state
 	refreshCancel context.CancelFunc
 	refreshLoop   *authAutoRefreshLoop

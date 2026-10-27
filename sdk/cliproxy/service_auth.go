@@ -3,10 +3,12 @@ package cliproxy
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotahistory"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher"
@@ -706,6 +708,25 @@ func (s *Service) resolveCooldownStateStore(cfg *config.Config) coreauth.Cooldow
 		return nil
 	}
 	return coreauth.NewFileCooldownStateStoreWithAuthDir(authDir, authDir)
+}
+
+// startQuotaHistory records Claude rate-limit headers under the auth directory.
+// It stays disabled when there is no local auth directory.
+func (s *Service) startQuotaHistory(ctx context.Context, cfg *config.Config) {
+	if s == nil || s.coreManager == nil || cfg == nil || cfg.Home.Enabled {
+		return
+	}
+	authDir, errResolve := resolveCooldownStateAuthDir(cfg)
+	if errResolve != nil {
+		log.Warnf("failed to resolve quota history directory: %v", errResolve)
+		return
+	}
+	if authDir == "" {
+		return
+	}
+	recorder := quotahistory.NewRecorder(quotahistory.NewStore(filepath.Join(authDir, quotahistory.DirName)))
+	s.coreManager.SetQuotaHistoryRecorder(recorder)
+	go recorder.Run(ctx)
 }
 
 func resolveCooldownStateAuthDir(cfg *config.Config) (string, error) {

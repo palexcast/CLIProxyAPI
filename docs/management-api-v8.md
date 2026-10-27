@@ -140,6 +140,7 @@ retain the corresponding business operation's fields.
 | `/observability/logs/requests/<id>` | GET | Get a request log. |
 | `/observability/usage/api-keys` | GET | Get API-key usage. |
 | `/observability/usage/queue` | GET | Get queued usage events. |
+| `/observability/quota-history` | GET | Get recorded Claude 5h/7d rate-limit samples (`since`, `until`, repeatable `auth_id`, `step`). `step` is optional integer seconds: 0 or absent returns raw samples; a positive value keeps each account's first sample in the range, its last sample per `step`-aligned bucket and both samples around every 5h/7d reset change. The response echoes the effective `step`; at most 200,000 samples are returned, oldest dropped first, with `truncated` set. Successful Claude usage-endpoint calls (`https://api.anthropic.com/api/oauth/usage`) made through `/requests/api-call` with a Claude `auth_index` are recorded too, subject to the same once-per-minute throttle per account. |
 | `/credentials` | GET, POST, DELETE | List, upload, or delete credential files. |
 | `/credentials/models` | GET | Get credential models. |
 | `/credentials/download` | GET | Download a credential file. |
