@@ -50,6 +50,9 @@ type quotaHistoryAccount struct {
 	Name     string `json:"name"`
 	Label    string `json:"label"`
 	Provider string `json:"provider"`
+	// Disabled marks an account the operator switched off: it stays loaded but
+	// takes no requests, so pooled capacity must leave it out.
+	Disabled bool `json:"disabled"`
 }
 
 type quotaHistoryResponse struct {
@@ -155,6 +158,7 @@ func claudeQuotaAccounts(manager *coreauth.Manager) []quotaHistoryAccount {
 			Name:     name,
 			Label:    auth.Label,
 			Provider: "claude",
+			Disabled: auth.Disabled,
 		})
 	}
 	sort.Slice(accounts, func(i, j int) bool { return accounts[i].AuthID < accounts[j].AuthID })

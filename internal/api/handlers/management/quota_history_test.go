@@ -30,7 +30,7 @@ func TestGetQuotaHistory(t *testing.T) {
 
 	manager := coreauth.NewManager(nil, nil, nil)
 	for _, auth := range []*coreauth.Auth{
-		{ID: "claude-b", Provider: "claude", FileName: "/auths/claude-b-user@example.com.json", Label: "B team"},
+		{ID: "claude-b", Provider: "claude", FileName: "/auths/claude-b-user@example.com.json", Label: "B team", Disabled: true},
 		{ID: "claude-a", Provider: "claude", Label: "A"},
 		{ID: "codex-a", Provider: "codex"},
 	} {
@@ -82,7 +82,7 @@ func TestGetQuotaHistory(t *testing.T) {
 	}
 	wantAccounts := []quotaHistoryAccount{
 		{AuthID: "claude-a", Name: "claude-a", Label: "A", Provider: "claude"},
-		{AuthID: "claude-b", Name: "claude-b-user@example.com.json", Label: "B team", Provider: "claude"},
+		{AuthID: "claude-b", Name: "claude-b-user@example.com.json", Label: "B team", Provider: "claude", Disabled: true},
 	}
 	if len(payload.Accounts) != 2 || payload.Accounts[0] != wantAccounts[0] || payload.Accounts[1] != wantAccounts[1] {
 		t.Fatalf("accounts = %#v", payload.Accounts)
@@ -183,7 +183,7 @@ func TestGetQuotaSnapshot(t *testing.T) {
 	for _, auth := range []*coreauth.Auth{
 		{ID: "claude-b", Provider: "claude", FileName: "/auths/claude-b-user@example.com.json", Label: "B team"},
 		{ID: "claude-a", Provider: "claude", Label: "A"},
-		{ID: "claude-c", Provider: "claude"},
+		{ID: "claude-c", Provider: "claude", Disabled: true},
 		{ID: "codex-a", Provider: "codex"},
 	} {
 		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
@@ -194,9 +194,9 @@ func TestGetQuotaSnapshot(t *testing.T) {
 
 	// Without a recorder every account is listed with nothing known.
 	rec = serveQuotaSnapshot(h)
-	if want := `[{"auth_id":"claude-a","name":"claude-a","label":"A","provider":"claude"},` +
-		`{"auth_id":"claude-b","name":"claude-b-user@example.com.json","label":"B team","provider":"claude"},` +
-		`{"auth_id":"claude-c","name":"claude-c","label":"","provider":"claude"}]`; rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"accounts":`+want) {
+	if want := `[{"auth_id":"claude-a","name":"claude-a","label":"A","provider":"claude","disabled":false},` +
+		`{"auth_id":"claude-b","name":"claude-b-user@example.com.json","label":"B team","provider":"claude","disabled":false},` +
+		`{"auth_id":"claude-c","name":"claude-c","label":"","provider":"claude","disabled":true}]`; rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"accounts":`+want) {
 		t.Fatalf("no recorder: status = %d body=%s", rec.Code, rec.Body.String())
 	}
 
@@ -232,7 +232,7 @@ func TestGetQuotaSnapshot(t *testing.T) {
 		t.Fatalf("accounts = %s", rec.Body.String())
 	}
 	a, b, c := payload.Accounts[0], payload.Accounts[1], payload.Accounts[2]
-	if a["auth_id"] != "claude-a" || a["observed_at"] != "2026-10-27T11:58:03Z" || a["u5"] != 0.42 || len(a) != 6 {
+	if a["auth_id"] != "claude-a" || a["observed_at"] != "2026-10-27T11:58:03Z" || a["u5"] != 0.42 || a["disabled"] != false || len(a) != 7 {
 		t.Fatalf("claude-a = %#v", a)
 	}
 	usage, _ := b["usage"].(map[string]any)
@@ -242,7 +242,7 @@ func TestGetQuotaSnapshot(t *testing.T) {
 		b["refreshed_at"] != "2026-10-27T09:15:00Z" || usage == nil || usage["five_hour"] == nil || usage["extra_usage"] == nil {
 		t.Fatalf("claude-b = %#v", b)
 	}
-	if c["auth_id"] != "claude-c" || len(c) != 4 {
+	if c["auth_id"] != "claude-c" || c["disabled"] != true || len(c) != 5 {
 		t.Fatalf("claude-c = %#v", c)
 	}
 }
