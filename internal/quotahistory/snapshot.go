@@ -77,7 +77,11 @@ func (sn *Snapshot) Accounts() map[string]SnapshotEntry {
 // ApplySample folds a sample into its auth's entry. A sample older than the
 // entry's observed_at is ignored. Each window is taken from the sample only
 // when the sample carries that window's utilization; a window change clears
-// the older reset and status before the sample's own values are applied.
+// the older reset and status before the sample's own values are applied. A
+// window the sample does not carry is dropped once its reset is at or before
+// the sample: a response after the reset that reports no such window means the
+// account has none now (a verified Ultra plan has no 5h limit), and the old
+// reading describes a window that is over.
 func (sn *Snapshot) ApplySample(s Sample) {
 	if s.AuthID == "" || s.T.IsZero() || (s.U5 == nil && s.U7 == nil) {
 		return
@@ -92,8 +96,25 @@ func (sn *Snapshot) ApplySample(s Sample) {
 	e.ObservedAt = &at
 	e.U5, e.R5, e.S5 = applyWindow(e.U5, e.R5, e.S5, s.U5, s.R5, s.S5)
 	e.U7, e.R7, e.S7 = applyWindow(e.U7, e.R7, e.S7, s.U7, s.R7, s.S7)
+	e.dropEndedWindows()
 	sn.accounts[s.AuthID] = e
 	sn.dirty = true
+}
+
+// dropEndedWindows clears every window whose reset is at or before observed_at.
+// A reading taken after its own reset would carry the next reset, so such a
+// window was absent from every sample since it ended.
+func (e *SnapshotEntry) dropEndedWindows() {
+	if e.ObservedAt == nil {
+		return
+	}
+	at := e.ObservedAt.Unix()
+	if e.R5 != nil && *e.R5 <= at {
+		e.U5, e.R5, e.S5 = nil, nil, ""
+	}
+	if e.R7 != nil && *e.R7 <= at {
+		e.U7, e.R7, e.S7 = nil, nil, ""
+	}
 }
 
 func applyWindow(u *float64, r *int64, status string, nu *float64, nr *int64, nstatus string) (*float64, *int64, string) {
@@ -165,6 +186,8 @@ func (sn *Snapshot) Load() (bool, error) {
 	accounts := make(map[string]SnapshotEntry, len(file.Accounts))
 	for id, e := range file.Accounts {
 		if id != "" {
+			// A file written before ended windows were dropped may still hold one.
+			e.dropEndedWindows()
 			accounts[id] = e
 		}
 	}
