@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,6 +37,37 @@ type SnapshotEntry struct {
 	S7          string          `json:"s7,omitempty"`
 	RefreshedAt *time.Time      `json:"refreshed_at,omitempty"`
 	Usage       json.RawMessage `json:"usage,omitempty"`
+	Plan        *Plan           `json:"plan,omitempty"`
+}
+
+// Plan is the subscription an account's OAuth profile reports. The tier keeps
+// Anthropic's internal names: the Max plan reports default_claude_max_5x and the
+// Ultra plan (formerly Max 20x) default_claude_max_20x under a claude_max
+// organization; a Team Premium seat reports default_claude_max_5x under a
+// claude_team organization.
+type Plan struct {
+	OrganizationType string     `json:"organization_type,omitempty"`
+	RateLimitTier    string     `json:"rate_limit_tier,omitempty"`
+	ProfiledAt       *time.Time `json:"profiled_at,omitempty"`
+}
+
+// ParsePlan reads the plan fields of a Claude OAuth profile body. It reports
+// false when the body carries neither field.
+func ParsePlan(body []byte) (Plan, bool) {
+	var profile struct {
+		Organization struct {
+			OrganizationType string `json:"organization_type"`
+			RateLimitTier    string `json:"rate_limit_tier"`
+		} `json:"organization"`
+	}
+	if errDecode := json.Unmarshal(body, &profile); errDecode != nil {
+		return Plan{}, false
+	}
+	plan := Plan{
+		OrganizationType: strings.TrimSpace(profile.Organization.OrganizationType),
+		RateLimitTier:    strings.TrimSpace(profile.Organization.RateLimitTier),
+	}
+	return plan, plan.OrganizationType != "" || plan.RateLimitTier != ""
 }
 
 type snapshotFile struct {
@@ -148,6 +180,24 @@ func (sn *Snapshot) ApplyUsage(authID string, body json.RawMessage, at time.Time
 	at = at.UTC()
 	e.RefreshedAt = &at
 	e.Usage = body
+	sn.accounts[authID] = e
+	sn.dirty = true
+}
+
+// ApplyPlan stores an account's plan unless a newer one is already stored.
+func (sn *Snapshot) ApplyPlan(authID string, plan Plan, at time.Time) {
+	if authID == "" || at.IsZero() {
+		return
+	}
+	sn.mu.Lock()
+	defer sn.mu.Unlock()
+	e := sn.accounts[authID]
+	if e.Plan != nil && e.Plan.ProfiledAt != nil && at.Before(*e.Plan.ProfiledAt) {
+		return
+	}
+	at = at.UTC()
+	plan.ProfiledAt = &at
+	e.Plan = &plan
 	sn.accounts[authID] = e
 	sn.dirty = true
 }

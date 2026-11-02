@@ -20,10 +20,11 @@ const usageResponseBody = `{"five_hour":{"utilization":42.5,"resets_at":"2026-10
 	`"seven_day":{"utilization":16,"resets_at":"2026-10-31T09:00:00+00:00"},"extra_usage":{"is_enabled":false}}`
 
 type fakeSampleRecorder struct {
-	mu      sync.Mutex
-	samples []quotahistory.Sample
-	authIDs []string
-	usages  []string
+	mu       sync.Mutex
+	samples  []quotahistory.Sample
+	authIDs  []string
+	usages   []string
+	profiles []string
 }
 
 func (f *fakeSampleRecorder) Record(*coreauth.Auth, http.Header, time.Time) {}
@@ -39,6 +40,18 @@ func (f *fakeSampleRecorder) RecordUsage(auth *coreauth.Auth, body []byte, _ tim
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.usages = append(f.usages, auth.ID+" "+string(body))
+}
+
+func (f *fakeSampleRecorder) RecordProfile(auth *coreauth.Auth, body []byte, _ time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.profiles = append(f.profiles, auth.ID+" "+string(body))
+}
+
+func (f *fakeSampleRecorder) recordedProfiles() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.profiles...)
 }
 
 func (f *fakeSampleRecorder) recordedUsages() []string {
@@ -62,7 +75,8 @@ func TestAPICallRecordsClaudeUsageQuotaHistory(t *testing.T) {
 		want     bool
 	}{
 		{name: "claude usage", provider: "claude", url: "http://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1", status: http.StatusOK, want: true},
-		{name: "other path", provider: "claude", url: "http://api.anthropic.com/api/oauth/profile", status: http.StatusOK},
+		{name: "profile", provider: "claude", url: "http://api.anthropic.com/api/oauth/profile", status: http.StatusOK},
+		{name: "other path", provider: "claude", url: "http://api.anthropic.com/api/oauth/account", status: http.StatusOK},
 		{name: "other host", provider: "claude", url: "http://example.com/api/oauth/usage", status: http.StatusOK},
 		{name: "non-claude auth", provider: "codex", url: "http://api.anthropic.com/api/oauth/usage", status: http.StatusOK},
 		{name: "upstream 4xx", provider: "claude", url: "http://api.anthropic.com/api/oauth/usage", status: http.StatusTooManyRequests},
@@ -118,11 +132,19 @@ func TestAPICallRecordsClaudeUsageQuotaHistory(t *testing.T) {
 
 			samples, authIDs := fake.recorded()
 			usages := fake.recordedUsages()
+			profiles := fake.recordedProfiles()
 			if !tc.want {
-				if len(samples) != 0 || len(usages) != 0 {
-					t.Fatalf("recorded samples = %+v usages = %v, want none", samples, usages)
+				wantProfiles := 0
+				if tc.name == "profile" {
+					wantProfiles = 1
+				}
+				if len(samples) != 0 || len(usages) != 0 || len(profiles) != wantProfiles {
+					t.Fatalf("recorded samples = %+v usages = %v profiles = %v", samples, usages, profiles)
 				}
 				return
+			}
+			if len(profiles) != 0 {
+				t.Fatalf("usage recorded as a profile: %v", profiles)
 			}
 			if len(usages) != 1 || usages[0] != "claude-usage-a "+usageResponseBody {
 				t.Fatalf("recorded usages = %v", usages)

@@ -34,6 +34,12 @@ type quotaUsageRecorder interface {
 	RecordUsage(auth *coreauth.Auth, body []byte, now time.Time)
 }
 
+// quotaProfileRecorder keeps the plan of a Claude OAuth profile body per
+// account for the quota snapshot.
+type quotaProfileRecorder interface {
+	RecordProfile(auth *coreauth.Auth, body []byte, now time.Time)
+}
+
 // quotaSnapshotReader returns the latest known quota state keyed by auth id.
 type quotaSnapshotReader interface {
 	QuotaSnapshot() map[string]quotahistory.SnapshotEntry
@@ -42,10 +48,12 @@ type quotaSnapshotReader interface {
 var (
 	_ quotaHistorySampleRecorder = (*quotahistory.Recorder)(nil)
 	_ quotaUsageRecorder         = (*quotahistory.Recorder)(nil)
+	_ quotaProfileRecorder       = (*quotahistory.Recorder)(nil)
 	_ quotaSnapshotReader        = (*quotahistory.Recorder)(nil)
 )
 
-type quotaHistoryAccount struct {
+// quotaAccountIdentity names a Claude account in both quota endpoints.
+type quotaAccountIdentity struct {
 	AuthID   string `json:"auth_id"`
 	Name     string `json:"name"`
 	Label    string `json:"label"`
@@ -53,6 +61,13 @@ type quotaHistoryAccount struct {
 	// Disabled marks an account the operator switched off: it stays loaded but
 	// takes no requests, so pooled capacity must leave it out.
 	Disabled bool `json:"disabled"`
+}
+
+type quotaHistoryAccount struct {
+	quotaAccountIdentity
+	// Plan is the subscription from the account's last profile read through
+	// /requests/api-call; absent until one is seen.
+	Plan *quotahistory.Plan `json:"plan,omitempty"`
 }
 
 type quotaHistoryResponse struct {
@@ -123,7 +138,7 @@ func (h *Handler) GetQuotaHistory(c *gin.Context) {
 		Since:    since.Format(time.RFC3339),
 		Until:    until.Format(time.RFC3339),
 		Step:     step,
-		Accounts: claudeQuotaAccounts(manager),
+		Accounts: claudeQuotaAccounts(manager, quotaSnapshotEntries(manager)),
 		Samples:  []quotahistory.Sample{},
 	}
 
@@ -141,9 +156,18 @@ func (h *Handler) GetQuotaHistory(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
+// quotaSnapshotEntries returns the recorder's snapshot entries, or nil when the
+// recorder keeps none.
+func quotaSnapshotEntries(manager *coreauth.Manager) map[string]quotahistory.SnapshotEntry {
+	if reader, ok := manager.QuotaHistoryRecorder().(quotaSnapshotReader); ok {
+		return reader.QuotaSnapshot()
+	}
+	return nil
+}
+
 // claudeQuotaAccounts lists the Claude accounts the manager knows, sorted by
-// auth id.
-func claudeQuotaAccounts(manager *coreauth.Manager) []quotaHistoryAccount {
+// auth id, each with the plan its snapshot entry holds.
+func claudeQuotaAccounts(manager *coreauth.Manager, entries map[string]quotahistory.SnapshotEntry) []quotaHistoryAccount {
 	accounts := []quotaHistoryAccount{}
 	for _, auth := range manager.List() {
 		if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "claude") {
@@ -154,19 +178,23 @@ func claudeQuotaAccounts(manager *coreauth.Manager) []quotaHistoryAccount {
 			name = filepath.Base(auth.FileName)
 		}
 		accounts = append(accounts, quotaHistoryAccount{
-			AuthID:   auth.ID,
-			Name:     name,
-			Label:    auth.Label,
-			Provider: "claude",
-			Disabled: auth.Disabled,
+			quotaAccountIdentity: quotaAccountIdentity{
+				AuthID:   auth.ID,
+				Name:     name,
+				Label:    auth.Label,
+				Provider: "claude",
+				Disabled: auth.Disabled,
+			},
+			Plan: entries[auth.ID].Plan,
 		})
 	}
 	sort.Slice(accounts, func(i, j int) bool { return accounts[i].AuthID < accounts[j].AuthID })
 	return accounts
 }
 
+// quotaSnapshotAccount carries the plan through the snapshot entry.
 type quotaSnapshotAccount struct {
-	quotaHistoryAccount
+	quotaAccountIdentity
 	quotahistory.SnapshotEntry
 }
 
@@ -191,29 +219,27 @@ func (h *Handler) GetQuotaSnapshot(c *gin.Context) {
 		return
 	}
 
-	var entries map[string]quotahistory.SnapshotEntry
-	if reader, ok := manager.QuotaHistoryRecorder().(quotaSnapshotReader); ok {
-		entries = reader.QuotaSnapshot()
-	}
-	accounts := claudeQuotaAccounts(manager)
+	entries := quotaSnapshotEntries(manager)
+	accounts := claudeQuotaAccounts(manager, entries)
 	resp := quotaSnapshotResponse{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		Accounts:    make([]quotaSnapshotAccount, 0, len(accounts)),
 	}
 	for _, account := range accounts {
 		resp.Accounts = append(resp.Accounts, quotaSnapshotAccount{
-			quotaHistoryAccount: account,
-			SnapshotEntry:       entries[account.AuthID],
+			quotaAccountIdentity: account.quotaAccountIdentity,
+			SnapshotEntry:        entries[account.AuthID],
 		})
 	}
 	c.JSON(http.StatusOK, resp)
 }
 
-// recordUsageQuotaHistory adds a quota-history sample for a successful Claude
-// usage endpoint response relayed by APICall, so a quota refresh records the
-// 5h/7d windows even when proxied responses omit the 7d headers, and keeps the
-// body in the quota snapshot.
-func (h *Handler) recordUsageQuotaHistory(auth *coreauth.Auth, requestURL *url.URL, statusCode int, body []byte) {
+// recordClaudeAPICall feeds a successful Claude response relayed by APICall
+// into the quota history. A usage endpoint response adds a sample, so a quota
+// refresh records the 5h/7d windows even when proxied responses omit the 7d
+// headers, and keeps the body in the quota snapshot; a profile response keeps
+// the account's plan there.
+func (h *Handler) recordClaudeAPICall(auth *coreauth.Auth, requestURL *url.URL, statusCode int, body []byte) {
 	if h == nil || auth == nil || requestURL == nil {
 		return
 	}
@@ -221,8 +247,10 @@ func (h *Handler) recordUsageQuotaHistory(auth *coreauth.Auth, requestURL *url.U
 		return
 	}
 	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "claude") ||
-		!strings.EqualFold(requestURL.Hostname(), "api.anthropic.com") ||
-		requestURL.Path != "/api/oauth/usage" {
+		!strings.EqualFold(requestURL.Hostname(), "api.anthropic.com") {
+		return
+	}
+	if requestURL.Path != "/api/oauth/usage" && requestURL.Path != "/api/oauth/profile" {
 		return
 	}
 	h.mu.Lock()
@@ -233,6 +261,12 @@ func (h *Handler) recordUsageQuotaHistory(auth *coreauth.Auth, requestURL *url.U
 	}
 	recorder := manager.QuotaHistoryRecorder()
 	now := time.Now()
+	if requestURL.Path == "/api/oauth/profile" {
+		if profileRecorder, ok := recorder.(quotaProfileRecorder); ok {
+			profileRecorder.RecordProfile(auth, body, now)
+		}
+		return
+	}
 	if usageRecorder, ok := recorder.(quotaUsageRecorder); ok {
 		usageRecorder.RecordUsage(auth, body, now)
 	}

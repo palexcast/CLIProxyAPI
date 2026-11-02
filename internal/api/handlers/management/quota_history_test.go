@@ -81,8 +81,8 @@ func TestGetQuotaHistory(t *testing.T) {
 		t.Fatalf("range = %s..%s truncated=%v step=%d", payload.Since, payload.Until, payload.Truncated, payload.Step)
 	}
 	wantAccounts := []quotaHistoryAccount{
-		{AuthID: "claude-a", Name: "claude-a", Label: "A", Provider: "claude"},
-		{AuthID: "claude-b", Name: "claude-b-user@example.com.json", Label: "B team", Provider: "claude", Disabled: true},
+		{quotaAccountIdentity: quotaAccountIdentity{AuthID: "claude-a", Name: "claude-a", Label: "A", Provider: "claude"}},
+		{quotaAccountIdentity: quotaAccountIdentity{AuthID: "claude-b", Name: "claude-b-user@example.com.json", Label: "B team", Provider: "claude", Disabled: true}},
 	}
 	if len(payload.Accounts) != 2 || payload.Accounts[0] != wantAccounts[0] || payload.Accounts[1] != wantAccounts[1] {
 		t.Fatalf("accounts = %#v", payload.Accounts)
@@ -209,7 +209,9 @@ func TestGetQuotaSnapshot(t *testing.T) {
 			ObservedAt: &observed, U5: &u5, R5: &r5, S5: "allowed", U7: &u7, R7: &r7, S7: "allowed",
 			RefreshedAt: &refreshed, Usage: json.RawMessage(`{"five_hour":{"utilization":42},"extra_usage":{"is_enabled":false}}`),
 		},
-		"claude-a":    {ObservedAt: &observed, U5: &u5},
+		"claude-a": {ObservedAt: &observed, U5: &u5, Plan: &quotahistory.Plan{
+			OrganizationType: "claude_max", RateLimitTier: "default_claude_max_20x", ProfiledAt: &refreshed,
+		}},
 		"claude-gone": {ObservedAt: &observed, U7: &u7},
 	}})
 	before := time.Now().UTC().Truncate(time.Second)
@@ -232,7 +234,9 @@ func TestGetQuotaSnapshot(t *testing.T) {
 		t.Fatalf("accounts = %s", rec.Body.String())
 	}
 	a, b, c := payload.Accounts[0], payload.Accounts[1], payload.Accounts[2]
-	if a["auth_id"] != "claude-a" || a["observed_at"] != "2026-10-27T11:58:03Z" || a["u5"] != 0.42 || a["disabled"] != false || len(a) != 7 {
+	plan, _ := a["plan"].(map[string]any)
+	if a["auth_id"] != "claude-a" || a["observed_at"] != "2026-10-27T11:58:03Z" || a["u5"] != 0.42 || a["disabled"] != false || len(a) != 8 ||
+		plan["organization_type"] != "claude_max" || plan["rate_limit_tier"] != "default_claude_max_20x" || plan["profiled_at"] != "2026-10-27T09:15:00Z" {
 		t.Fatalf("claude-a = %#v", a)
 	}
 	usage, _ := b["usage"].(map[string]any)
@@ -244,5 +248,12 @@ func TestGetQuotaSnapshot(t *testing.T) {
 	}
 	if c["auth_id"] != "claude-c" || c["disabled"] != true || len(c) != 5 {
 		t.Fatalf("claude-c = %#v", c)
+	}
+
+	// Quota history lists the same plan with each account.
+	history := serveQuotaHistory(t, h, "")
+	if want := `{"auth_id":"claude-a","name":"claude-a","label":"A","provider":"claude","disabled":false,` +
+		`"plan":{"organization_type":"claude_max","rate_limit_tier":"default_claude_max_20x","profiled_at":"2026-10-27T09:15:00Z"}}`; !strings.Contains(history.Body.String(), want) {
+		t.Fatalf("history accounts = %s", history.Body.String())
 	}
 }

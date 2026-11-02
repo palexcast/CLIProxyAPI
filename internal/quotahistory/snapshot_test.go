@@ -487,3 +487,39 @@ func TestSnapshotLoadDropsEndedWindow(t *testing.T) {
 		t.Fatalf("loaded = %s, want %s", entryString(got), want)
 	}
 }
+
+func TestParsePlan(t *testing.T) {
+	plan, ok := ParsePlan([]byte(`{"account":{"has_claude_max":true},"organization":{"organization_type":"claude_max","rate_limit_tier":"default_claude_max_20x","billing_type":"stripe_subscription"}}`))
+	if !ok || plan.OrganizationType != "claude_max" || plan.RateLimitTier != "default_claude_max_20x" {
+		t.Fatalf("plan = %+v ok = %v", plan, ok)
+	}
+	for _, body := range []string{`{"account":{}}`, `{"organization":{"organization_type":"  "}}`, `not json`, ``} {
+		if _, ok := ParsePlan([]byte(body)); ok {
+			t.Fatalf("ParsePlan(%q) reported a plan", body)
+		}
+	}
+}
+
+func TestRecorderRecordProfileKeepsNewestPlanAcrossReload(t *testing.T) {
+	dir := t.TempDir()
+	r := NewRecorder(NewStore(dir))
+	auth := &coreauth.Auth{ID: "claude-a", Provider: "claude"}
+	base := time.Date(2026, 11, 2, 11, 0, 0, 0, time.UTC)
+	r.RecordProfile(auth, []byte(`{"organization":{"organization_type":"claude_max","rate_limit_tier":"default_claude_max_5x"}}`), base.Add(time.Minute))
+	// An older profile response never replaces a newer one.
+	r.RecordProfile(auth, []byte(`{"organization":{"organization_type":"claude_team","rate_limit_tier":"default_claude_max_5x"}}`), base)
+	r.RecordProfile(&coreauth.Auth{ID: "codex-a", Provider: "codex"}, []byte(`{"organization":{"organization_type":"x"}}`), base)
+	r.drainQueue()
+	if errFlush := r.snapshot.Flush(base, true); errFlush != nil {
+		t.Fatal(errFlush)
+	}
+
+	reloaded := NewSnapshot(dir)
+	if _, errLoad := reloaded.Load(); errLoad != nil {
+		t.Fatal(errLoad)
+	}
+	accounts := reloaded.Accounts()
+	if want := `{"plan":{"organization_type":"claude_max","rate_limit_tier":"default_claude_max_5x","profiled_at":"2026-11-02T11:01:00Z"}}`; len(accounts) != 1 || entryString(accounts["claude-a"]) != want {
+		t.Fatalf("reloaded = %v, want claude-a %s", accounts, want)
+	}
+}

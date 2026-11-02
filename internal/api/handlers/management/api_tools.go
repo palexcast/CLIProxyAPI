@@ -233,7 +233,7 @@ func (h *Handler) APICall(c *gin.Context) {
 		return
 	}
 
-	h.recordUsageQuotaHistory(auth, parsedURL, resp.StatusCode, respBody)
+	h.recordClaudeAPICall(auth, parsedURL, resp.StatusCode, respBody)
 
 	c.JSON(http.StatusOK, apiCallResponse{
 		StatusCode: resp.StatusCode,

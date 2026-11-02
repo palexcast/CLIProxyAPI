@@ -505,10 +505,17 @@ type Recorder struct {
 	dropWarnAt time.Time
 }
 
-// queueItem is either a rate-limit sample or a usage-endpoint body.
+// queueItem is a rate-limit sample, a usage-endpoint body or a profile plan.
 type queueItem struct {
 	sample Sample
 	usage  *usageRecord
+	plan   *planRecord
+}
+
+type planRecord struct {
+	authID string
+	at     time.Time
+	plan   Plan
 }
 
 type usageRecord struct {
@@ -629,6 +636,25 @@ func (r *Recorder) RecordUsage(auth *coreauth.Auth, body []byte, now time.Time) 
 	r.enqueue(item, now)
 }
 
+// RecordProfile keeps the plan of a Claude OAuth profile body in the snapshot.
+func (r *Recorder) RecordProfile(auth *coreauth.Auth, body []byte, now time.Time) {
+	if r == nil || !isClaude(auth) {
+		return
+	}
+	plan, ok := ParsePlan(body)
+	if !ok {
+		log.Debug("quota history: profile response carried no plan")
+		return
+	}
+	if now.IsZero() {
+		now = r.nowFunc()
+	}
+	item := queueItem{plan: &planRecord{authID: auth.ID, at: now.UTC().Truncate(time.Second), plan: plan}}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.enqueue(item, now)
+}
+
 // enqueue hands item to the writer without blocking. r.mu must be held.
 func (r *Recorder) enqueue(item queueItem, now time.Time) bool {
 	select {
@@ -710,6 +736,10 @@ func (r *Recorder) drainQueue() {
 func (r *Recorder) handle(item queueItem) {
 	if item.usage != nil {
 		r.snapshot.ApplyUsage(item.usage.authID, item.usage.body, item.usage.at)
+		return
+	}
+	if item.plan != nil {
+		r.snapshot.ApplyPlan(item.plan.authID, item.plan.plan, item.plan.at)
 		return
 	}
 	if errAppend := r.store.Append(item.sample); errAppend != nil {
