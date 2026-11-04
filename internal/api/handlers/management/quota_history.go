@@ -61,6 +61,9 @@ type quotaAccountIdentity struct {
 	// Disabled marks an account the operator switched off: it stays loaded but
 	// takes no requests, so pooled capacity must leave it out.
 	Disabled bool `json:"disabled"`
+	// Priority is the credential's routing priority, read as the selector reads
+	// it: new sessions and failover go to the highest available priority.
+	Priority int `json:"priority"`
 }
 
 type quotaHistoryAccount struct {
@@ -184,12 +187,26 @@ func claudeQuotaAccounts(manager *coreauth.Manager, entries map[string]quotahist
 				Label:    auth.Label,
 				Provider: "claude",
 				Disabled: auth.Disabled,
+				Priority: quotaAccountPriority(auth),
 			},
 			Plan: entries[auth.ID].Plan,
 		})
 	}
 	sort.Slice(accounts, func(i, j int) bool { return accounts[i].AuthID < accounts[j].AuthID })
 	return accounts
+}
+
+// quotaAccountPriority parses the auth's "priority" attribute like the
+// selector does; 0 when absent or not an integer.
+func quotaAccountPriority(auth *coreauth.Auth) int {
+	if auth == nil || auth.Attributes == nil {
+		return 0
+	}
+	priority, errAtoi := strconv.Atoi(strings.TrimSpace(auth.Attributes["priority"]))
+	if errAtoi != nil {
+		return 0
+	}
+	return priority
 }
 
 // quotaSnapshotAccount carries the plan through the snapshot entry.

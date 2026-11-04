@@ -31,7 +31,7 @@ func TestGetQuotaHistory(t *testing.T) {
 	manager := coreauth.NewManager(nil, nil, nil)
 	for _, auth := range []*coreauth.Auth{
 		{ID: "claude-b", Provider: "claude", FileName: "/auths/claude-b-user@example.com.json", Label: "B team", Disabled: true},
-		{ID: "claude-a", Provider: "claude", Label: "A"},
+		{ID: "claude-a", Provider: "claude", Label: "A", Attributes: map[string]string{"priority": " 11 "}},
 		{ID: "codex-a", Provider: "codex"},
 	} {
 		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
@@ -81,7 +81,7 @@ func TestGetQuotaHistory(t *testing.T) {
 		t.Fatalf("range = %s..%s truncated=%v step=%d", payload.Since, payload.Until, payload.Truncated, payload.Step)
 	}
 	wantAccounts := []quotaHistoryAccount{
-		{quotaAccountIdentity: quotaAccountIdentity{AuthID: "claude-a", Name: "claude-a", Label: "A", Provider: "claude"}},
+		{quotaAccountIdentity: quotaAccountIdentity{AuthID: "claude-a", Name: "claude-a", Label: "A", Provider: "claude", Priority: 11}},
 		{quotaAccountIdentity: quotaAccountIdentity{AuthID: "claude-b", Name: "claude-b-user@example.com.json", Label: "B team", Provider: "claude", Disabled: true}},
 	}
 	if len(payload.Accounts) != 2 || payload.Accounts[0] != wantAccounts[0] || payload.Accounts[1] != wantAccounts[1] {
@@ -181,9 +181,9 @@ func TestGetQuotaSnapshot(t *testing.T) {
 
 	manager := coreauth.NewManager(nil, nil, nil)
 	for _, auth := range []*coreauth.Auth{
-		{ID: "claude-b", Provider: "claude", FileName: "/auths/claude-b-user@example.com.json", Label: "B team"},
+		{ID: "claude-b", Provider: "claude", FileName: "/auths/claude-b-user@example.com.json", Label: "B team", Attributes: map[string]string{"priority": "10"}},
 		{ID: "claude-a", Provider: "claude", Label: "A"},
-		{ID: "claude-c", Provider: "claude", Disabled: true},
+		{ID: "claude-c", Provider: "claude", Disabled: true, Attributes: map[string]string{"priority": "high"}},
 		{ID: "codex-a", Provider: "codex"},
 	} {
 		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
@@ -194,9 +194,9 @@ func TestGetQuotaSnapshot(t *testing.T) {
 
 	// Without a recorder every account is listed with nothing known.
 	rec = serveQuotaSnapshot(h)
-	if want := `[{"auth_id":"claude-a","name":"claude-a","label":"A","provider":"claude","disabled":false},` +
-		`{"auth_id":"claude-b","name":"claude-b-user@example.com.json","label":"B team","provider":"claude","disabled":false},` +
-		`{"auth_id":"claude-c","name":"claude-c","label":"","provider":"claude","disabled":true}]`; rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"accounts":`+want) {
+	if want := `[{"auth_id":"claude-a","name":"claude-a","label":"A","provider":"claude","disabled":false,"priority":0},` +
+		`{"auth_id":"claude-b","name":"claude-b-user@example.com.json","label":"B team","provider":"claude","disabled":false,"priority":10},` +
+		`{"auth_id":"claude-c","name":"claude-c","label":"","provider":"claude","disabled":true,"priority":0}]`; rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"accounts":`+want) {
 		t.Fatalf("no recorder: status = %d body=%s", rec.Code, rec.Body.String())
 	}
 
@@ -235,24 +235,24 @@ func TestGetQuotaSnapshot(t *testing.T) {
 	}
 	a, b, c := payload.Accounts[0], payload.Accounts[1], payload.Accounts[2]
 	plan, _ := a["plan"].(map[string]any)
-	if a["auth_id"] != "claude-a" || a["observed_at"] != "2026-10-27T11:58:03Z" || a["u5"] != 0.42 || a["disabled"] != false || len(a) != 8 ||
+	if a["auth_id"] != "claude-a" || a["observed_at"] != "2026-10-27T11:58:03Z" || a["u5"] != 0.42 || a["disabled"] != false || len(a) != 9 ||
 		plan["organization_type"] != "claude_max" || plan["rate_limit_tier"] != "default_claude_max_20x" || plan["profiled_at"] != "2026-10-27T09:15:00Z" {
 		t.Fatalf("claude-a = %#v", a)
 	}
 	usage, _ := b["usage"].(map[string]any)
-	if b["auth_id"] != "claude-b" || b["name"] != "claude-b-user@example.com.json" || b["label"] != "B team" ||
+	if b["auth_id"] != "claude-b" || b["name"] != "claude-b-user@example.com.json" || b["label"] != "B team" || b["priority"] != float64(10) ||
 		b["u5"] != 0.42 || b["r5"] != float64(r5) || b["s5"] != "allowed" ||
 		b["u7"] != 0.11 || b["r7"] != float64(r7) || b["s7"] != "allowed" ||
 		b["refreshed_at"] != "2026-10-27T09:15:00Z" || usage == nil || usage["five_hour"] == nil || usage["extra_usage"] == nil {
 		t.Fatalf("claude-b = %#v", b)
 	}
-	if c["auth_id"] != "claude-c" || c["disabled"] != true || len(c) != 5 {
+	if c["auth_id"] != "claude-c" || c["disabled"] != true || c["priority"] != float64(0) || len(c) != 6 {
 		t.Fatalf("claude-c = %#v", c)
 	}
 
 	// Quota history lists the same plan with each account.
 	history := serveQuotaHistory(t, h, "")
-	if want := `{"auth_id":"claude-a","name":"claude-a","label":"A","provider":"claude","disabled":false,` +
+	if want := `{"auth_id":"claude-a","name":"claude-a","label":"A","provider":"claude","disabled":false,"priority":0,` +
 		`"plan":{"organization_type":"claude_max","rate_limit_tier":"default_claude_max_20x","profiled_at":"2026-10-27T09:15:00Z"}}`; !strings.Contains(history.Body.String(), want) {
 		t.Fatalf("history accounts = %s", history.Body.String())
 	}
