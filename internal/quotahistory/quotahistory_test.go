@@ -172,8 +172,21 @@ func TestExtractFromUsage(t *testing.T) {
 			ok:   true, u5: float(0.1), r5: i64(r5),
 		},
 		{
-			name: "null reset drops the window",
+			// An idle window (nothing opened it since its last reset) is kept
+			// without a reset, unlike a window the account does not have.
+			name: "null reset keeps an idle window without a reset",
 			body: `{"five_hour":{"utilization":0,"resets_at":null},"seven_day":null}`,
+			ok:   true, u5: float(0),
+		},
+		{
+			name: "idle five hour beside a weekly window",
+			body: `{"five_hour":{"utilization":0,"resets_at":null},"seven_day":{"utilization":63,"resets_at":"2026-10-31T09:00:00Z"}}`,
+			ok:   true, u5: float(0), u7: float(0.63), r7: i64(r7),
+		},
+		{
+			name: "null five hour window is absent",
+			body: `{"five_hour":null,"seven_day":{"utilization":63,"resets_at":"2026-10-31T09:00:00Z"}}`,
+			ok:   true, u7: float(0.63), r7: i64(r7),
 		},
 		{
 			name: "five hour out of range keeps seven day",

@@ -472,6 +472,23 @@ func TestSnapshotDropsWindowEndedWithoutNewerReading(t *testing.T) {
 	}
 }
 
+func TestSnapshotIdleWindowAfterReset(t *testing.T) {
+	sn := NewSnapshot(t.TempDir())
+	nov10 := time.Date(2026, 11, 10, 13, 43, 0, 0, time.UTC)
+	reset5 := time.Date(2026, 11, 10, 15, 30, 0, 0, time.UTC).Unix()
+	sn.ApplySample(Sample{T: nov10, AuthID: "team", U5: float(0.45), R5: i64(reset5), U7: float(1), R7: i64(1794650400), S7: "rejected"})
+
+	// A usage refresh after the 5h reset reports the idle window (utilization 0,
+	// no reset): the entry keeps a 5h reading of 0 with no reset or status. The
+	// weekly drop (a reset grant) clears the old rejected status.
+	nov11 := time.Date(2026, 11, 11, 8, 18, 45, 0, time.UTC)
+	sn.ApplySample(Sample{T: nov11, AuthID: "team", U5: float(0), U7: float(0.63), R7: i64(1794650400)})
+	got := sn.Accounts()["team"]
+	if want := `{"observed_at":"2026-11-11T08:18:45Z","u5":0,"u7":0.63,"r7":1794650400}`; entryString(got) != want {
+		t.Fatalf("idle entry = %s, want %s", entryString(got), want)
+	}
+}
+
 func TestSnapshotLoadDropsEndedWindow(t *testing.T) {
 	dir := t.TempDir()
 	stale := `{"accounts":{"ultra":{"observed_at":"2026-11-02T11:04:56Z","u5":1,"r5":1793483400,"s5":"rejected","u7":0.28,"r7":1794059999,"s7":"allowed"}}}`

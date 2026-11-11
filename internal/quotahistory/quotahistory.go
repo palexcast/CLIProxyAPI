@@ -83,7 +83,8 @@ type usageWindow struct {
 // ExtractFromUsage builds a sample from the JSON body of the Claude OAuth usage
 // endpoint (/api/oauth/usage). That endpoint reports utilization as a
 // percentage in [0, 100], which is stored as a fraction like the headers. A
-// window without a valid utilization is omitted; it reports false when neither
+// window without a valid utilization is omitted, and one with a null reset
+// (idle, not opened since its last reset) carries no reset; it reports false when neither
 // window parsed. The endpoint carries no status, so s5/s7 are only set to
 // "rejected" when a window is fully used.
 func ExtractFromUsage(body []byte) (Sample, bool) {
@@ -117,10 +118,14 @@ func parseUsageWindow(w *usageWindow) (*float64, *int64, string) {
 	if fraction >= 1 {
 		status = "rejected"
 	}
-	// A window without a valid reset is not recorded: a reading with no window
-	// cannot be placed, and the panel already treats a passed reset as refilled.
+	// A null reset is an idle window: the account has the window, but no request
+	// has opened it since the last one ended (a Team seat reports
+	// {"utilization":0,"resets_at":null}). It is kept as a utilization-only
+	// reading, so it stays distinct from a window the account does not have at
+	// all (a verified Ultra plan reports "five_hour":null). An unparsable reset
+	// still drops the window.
 	if w.ResetsAt == nil {
-		return nil, nil, ""
+		return &fraction, nil, status
 	}
 	t, errTime := time.Parse(time.RFC3339, strings.TrimSpace(*w.ResetsAt))
 	if errTime != nil {
