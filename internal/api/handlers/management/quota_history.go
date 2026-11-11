@@ -287,14 +287,13 @@ func (h *Handler) recordClaudeAPICall(auth *coreauth.Auth, requestURL *url.URL, 
 	if usageRecorder, ok := recorder.(quotaUsageRecorder); ok {
 		usageRecorder.RecordUsage(auth, body, now)
 	}
-	sampleRecorder, ok := recorder.(quotaHistorySampleRecorder)
-	if !ok {
-		return
-	}
 	sample, ok := quotahistory.ExtractFromUsage(body)
 	if !ok {
 		log.Debug("quota history: usage response carried no 5h/7d window")
 		return
 	}
-	sampleRecorder.RecordSampleNow(auth, sample, now)
+	if sampleRecorder, ok := recorder.(quotaHistorySampleRecorder); ok {
+		sampleRecorder.RecordSampleNow(auth, sample, now)
+	}
+	liftClearedQuotaCooldown(manager, auth.ID, sample, now)
 }

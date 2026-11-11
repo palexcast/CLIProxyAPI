@@ -131,7 +131,7 @@ retain the corresponding business operation's fields.
 | --- | --- | --- |
 | `/config/upstream/<provider>` | GET, PUT, PATCH, DELETE | Manage shared provider settings. |
 | `/server/latest-version` | GET | Get latest release information. |
-| `/requests/api-call` | POST | Make an authenticated upstream call. |
+| `/requests/api-call` | POST | Make an authenticated upstream call. A successful Claude usage-endpoint call (`https://api.anthropic.com/api/oauth/usage`) also lifts the account's quota cooldown when the reading shows the window that set it has room again: every 5h/7d window reported is below 100%, each live quota cooldown deadline is within 2 minutes of the reset of a reported window, and no non-quota block is live. A cooldown whose window the reading leaves out stays. |
 | `/routing/cooldown/reset` | POST | Clear credential cooldown. |
 | `/routing/model-definitions/<channel>` | GET | Get model definitions. |
 | `/observability/logs` | GET, DELETE | Read or clear application logs. |
