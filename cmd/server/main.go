@@ -771,6 +771,7 @@ func run() (exitStatus int) {
 				managementasset.StartAutoUpdater(context.Background(), configFilePath)
 				misc.StartAntigravityVersionUpdater(context.Background())
 				registry.SetLocalModelCatalogs(localModel)
+				enableModelCatalogCache()
 				hook := tui.NewLogHook(2000)
 				hook.SetFormatter(&logging.LogFormatter{})
 				log.AddHook(hook)
@@ -864,6 +865,7 @@ func run() (exitStatus int) {
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
 			misc.StartAntigravityVersionUpdater(context.Background())
 			registry.SetLocalModelCatalogs(localModel)
+			enableModelCatalogCache()
 			if errStart := cmd.StartServiceWithPluginHost(cfg, configFilePath, password, pluginHost, serverOptions...); errStart != nil {
 				if log.StandardLogger().Out != os.Stderr {
 					_, _ = fmt.Fprintf(os.Stderr, "proxy service error: %v\n", errStart)
@@ -1019,4 +1021,15 @@ func splitArgvFlag(arg string) (name, value string, hasValue bool) {
 	arg = strings.TrimPrefix(arg, "-")
 	name, value, hasValue = strings.Cut(arg, "=")
 	return name, value, hasValue
+}
+
+// enableModelCatalogCache keeps fetched catalogs in the user cache directory,
+// outside the auth dir, whose *.json files the file store lists as credentials.
+func enableModelCatalogCache() {
+	cacheDir, errCacheDir := os.UserCacheDir()
+	if errCacheDir != nil {
+		log.WithError(errCacheDir).Warn("model catalog cache disabled")
+		return
+	}
+	registry.SetModelCatalogCacheDir(filepath.Join(cacheDir, "cliproxyapi", "model-catalogs"))
 }

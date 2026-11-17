@@ -32,6 +32,10 @@ type catalogUpdater struct {
 	fetch           func(context.Context, string) ([]byte, error)
 	fetchWithSource func(context.Context, string) ([]byte, string, error)
 	publish         func([]byte) ([]string, error)
+	// cacheName names this catalog's saved copy; empty disables saving.
+	cacheName string
+	// retryInitial overrides catalogRetryInitial when set.
+	retryInitial time.Duration
 }
 
 func (u *catalogUpdater) fetchCatalog(ctx context.Context, source string) ([]byte, string, error) {
@@ -63,18 +67,30 @@ func (u *catalogUpdater) configure(ctx context.Context, source string) {
 	}
 	generation := u.generation
 	go func() {
-		u.refresh(refreshCtx, source, generation)
 		if source == embeddedCatalogSource {
+			u.refresh(refreshCtx, source, generation)
 			return
 		}
-		ticker := time.NewTicker(ModelsRefreshInterval)
-		defer ticker.Stop()
+		u.loadSavedCatalog(refreshCtx, source, generation)
+		initialRetry := catalogRetryInitial
+		if u.retryInitial > 0 {
+			initialRetry = u.retryInitial
+		}
+		retry := initialRetry
 		for {
+			wait := ModelsRefreshInterval
+			if u.refresh(refreshCtx, source, generation) {
+				retry = initialRetry
+			} else {
+				wait = retry
+				retry = nextCatalogRetry(retry)
+			}
+			timer := time.NewTimer(wait)
 			select {
 			case <-refreshCtx.Done():
+				timer.Stop()
 				return
-			case <-ticker.C:
-				u.refresh(refreshCtx, source, generation)
+			case <-timer.C:
 			}
 		}
 	}()
@@ -99,23 +115,57 @@ type CatalogRefreshResult struct {
 	ChangedProviders []string                       `json:"changed_providers"`
 }
 
-func (u *catalogUpdater) refresh(ctx context.Context, source string, generation uint64) {
-	u.mu.Lock()
-	u.requestSeq++
-	seq := u.requestSeq
-	u.mu.Unlock()
-
+// refresh reports false only when the fetch failed or its catalog was rejected,
+// so the caller retries sooner; a result superseded by a newer one counts as done.
+func (u *catalogUpdater) refresh(ctx context.Context, source string, generation uint64) bool {
+	seq := u.nextRequestSeq()
 	data, _, errFetch := u.fetchCatalog(ctx, source)
 	if errFetch != nil {
 		if ctx.Err() == nil {
 			log.Warn("model catalog refresh failed; keeping last valid catalog")
 		}
+		return false
+	}
+	published, errPublish := u.publishCurrent(ctx, generation, seq, data)
+	if errPublish != nil {
+		log.Warn("model catalog rejected; keeping last valid catalog")
+		return false
+	}
+	if published && source != embeddedCatalogSource {
+		writeCatalogCache(u.cacheName, source, data)
+	}
+	return true
+}
+
+// loadSavedCatalog publishes the copy saved by an earlier run, ahead of the
+// first fetch; that fetch, taking a later sequence number, replaces it.
+func (u *catalogUpdater) loadSavedCatalog(ctx context.Context, source string, generation uint64) {
+	seq := u.nextRequestSeq()
+	data := readCatalogCache(u.cacheName, source)
+	if data == nil {
 		return
 	}
+	if published, errPublish := u.publishCurrent(ctx, generation, seq, data); errPublish != nil {
+		log.WithError(errPublish).Warn("saved model catalog rejected")
+	} else if published {
+		log.Info("model catalog loaded from the copy saved by the last fetch")
+	}
+}
+
+func (u *catalogUpdater) nextRequestSeq() uint64 {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.requestSeq++
+	return u.requestSeq
+}
+
+// publishCurrent publishes data unless the source changed, the context ended,
+// or a newer result was already published, and notifies on a publish.
+func (u *catalogUpdater) publishCurrent(ctx context.Context, generation, seq uint64, data []byte) (bool, error) {
 	u.mu.Lock()
 	if generation != u.generation || seq <= u.publishedSeq || ctx.Err() != nil {
 		u.mu.Unlock()
-		return
+		return false, nil
 	}
 	changed, errPublish := u.publish(data)
 	if errPublish == nil {
@@ -123,10 +173,10 @@ func (u *catalogUpdater) refresh(ctx context.Context, source string, generation 
 	}
 	u.mu.Unlock()
 	if errPublish != nil {
-		log.Warn("model catalog rejected; keeping last valid catalog")
-		return
+		return false, errPublish
 	}
 	notifyModelRefresh(changed)
+	return true, nil
 }
 
 func (u *catalogUpdater) refreshOnDemand(ctx context.Context, fallbackSource string, defaultURLs []string) (CatalogSourceStatus, error) {
@@ -230,6 +280,7 @@ func (u *catalogUpdater) refreshOnDemand(ctx context.Context, fallbackSource str
 			Error:  errPublish.Error(),
 		}, errPublish
 	}
+	writeCatalogCache(u.cacheName, source, data)
 	notifyModelRefresh(changed)
 	return CatalogSourceStatus{
 		Source:           displaySource,
@@ -352,6 +403,7 @@ func dynamicCatalogFetcherWithSource(embedded []byte, urls *[]string, validate f
 var generalCatalogUpdater = &catalogUpdater{
 	fetchWithSource: dynamicCatalogFetcherWithSource(embeddedModelsJSON, &modelsURLs, validateCatalogBytes),
 	publish:         publishCatalogBytes,
+	cacheName:       "models",
 }
 var codexCatalogUpdater = &catalogUpdater{
 	fetchWithSource: dynamicCatalogFetcherWithSource(embeddedCodexClientModelsJSON, &codexClientModelsURLs, ValidateCodexClientModelsJSON),
@@ -359,6 +411,7 @@ var codexCatalogUpdater = &catalogUpdater{
 		_, errLoad := loadCodexClientModelsFromBytes(data, "catalog")
 		return nil, errLoad
 	},
+	cacheName: "codex-client-models",
 }
 var devinCatalogUpdater = &catalogUpdater{
 	fetchWithSource: dynamicCatalogFetcherWithSource(embeddedDevinModelsJSON, &devinModelsURLs, validateDevinCatalogBytes),
@@ -369,6 +422,7 @@ var devinCatalogUpdater = &catalogUpdater{
 		}
 		return nil, errLoad
 	},
+	cacheName: "devin-models",
 }
 
 var catalogRuntime struct {
